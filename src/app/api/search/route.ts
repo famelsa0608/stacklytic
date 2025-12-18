@@ -1,15 +1,15 @@
 import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
-// Front-end'e dönecek verinin tipi
+// Tip Tanımları
 interface ProductData {
   id: string;
   title: string;
   price: number;
   image: string;
   url: string;
-  source: string; // 'Akakçe', 'Cimri' vb.
-  seller?: string; // 'Migros', 'Amazon' vb.
+  source: string;
+  seller?: string;
 }
 
 export async function GET(request: Request) {
@@ -17,97 +17,143 @@ export async function GET(request: Request) {
   const query = searchParams.get('q');
 
   if (!query) {
-    return NextResponse.json({ error: 'Lütfen bir ürün ismi girin.' }, { status: 400 });
+    return NextResponse.json({ error: 'Ürün ismi giriniz.' }, { status: 400 });
   }
 
-  console.log(`🕵️ Backend Aranıyor: ${query}`);
+  console.log(`🚀 Alternatif Kaynaklar Taranıyor: ${query}`);
   const products: ProductData[] = [];
 
-  // --- İNSAN TAKLİDİ YAPAN HEADERLAR (User-Agent Spoofing) ---
-  // Bu kısım çok önemli. Bot olduğumuzu gizlemeye çalışıyoruz.
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+  // Rastgele Tarayıcı Kimlikleri (User-Agent Rotation)
+  // Bu, tek bir bot gibi görünmemizi engeller.
+  const userAgents = [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+  ];
+
+  const getRandomHeader = () => ({
+    'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Referer': 'https://www.google.com/',
     'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive'
-  };
+    'Pragma': 'no-cache'
+  });
 
+  // --- 1. HEDEF: PAZARAMA (İş Bankası Güvencesi - Daha Az Bloklar) ---
   try {
-    // 1. ADIM: Akakçe Arama Sayfasına Git
-    const targetUrl = `https://www.akakce.com/arama/?q=${encodeURIComponent(query)}`;
+    const pazaramaUrl = `https://www.pazarama.com/arama?q=${encodeURIComponent(query)}`;
+    const res = await fetch(pazaramaUrl, { headers: getRandomHeader() });
     
-    const response = await fetch(targetUrl, { headers });
-    
-    if (!response.ok) {
-        throw new Error(`Akakçe Erişim Hatası: ${response.status}`);
+    if (res.ok) {
+        const html = await res.text();
+        const $ = cheerio.load(html);
+
+        $('[data-testid="product-card"]').each((i, el) => {
+            if (i > 2) return; // İlk 3 sonuç
+            const title = $(el).find('[data-testid="product-card-name"]').text().trim();
+            const priceText = $(el).find('[data-testid="product-card-price"]').text().trim();
+            const img = $(el).find('img').attr('src') || '';
+            let link = $(el).find('a').attr('href');
+            if (link && !link.startsWith('http')) link = `https://www.pazarama.com${link}`;
+
+            if (title && priceText) {
+                const cleanPrice = parseFloat(priceText.replace('TL', '').replace(/\./g, '').replace(',', '.').trim());
+                products.push({
+                    id: `pz-${i}`,
+                    source: 'Pazarama',
+                    title: title,
+                    price: cleanPrice,
+                    image: img,
+                    url: link || pazaramaUrl
+                });
+            }
+        });
+        console.log("✅ Pazarama verisi alındı.");
     }
+  } catch (e) { console.log("Pazarama atlandı."); }
 
-    const html = await response.text();
-    const $ = cheerio.load(html);
+  // --- 2. HEDEF: AMAZON TÜRKİYE (HTML Yapısı Kararlı) ---
+  try {
+    const amazonUrl = `https://www.amazon.com.tr/s?k=${encodeURIComponent(query)}`;
+    const res = await fetch(amazonUrl, { headers: getRandomHeader() });
+    
+    if (res.ok) {
+        const html = await res.text();
+        const $ = cheerio.load(html);
 
-    // 2. ADIM: HTML İçinden Verileri Ayıkla (Parsing)
-    // Akakçe'nin listeleme yapısı genelde "ul#CPL > li" içindedir.
-    $('ul#CPL > li').each((index, element) => {
-        // Çok fazla sonuç çekmemek için ilk 5-10 ürünü alalım
-        if (index > 8) return;
+        $('[data-component-type="s-search-result"]').each((i, el) => {
+            if (i > 2) return;
+            const title = $(el).find('h2 a span').text().trim();
+            // Amazon fiyatı parça parça verir: "1.250" ve "00"
+            const priceWhole = $(el).find('.a-price-whole').text().trim();
+            const priceFraction = $(el).find('.a-price-fraction').text().trim();
+            const img = $(el).find('.s-image').attr('src') || '';
+            let link = $(el).find('h2 a').attr('href');
+            if (link && !link.startsWith('http')) link = `https://www.amazon.com.tr${link}`;
 
-        // a) Ürün Linki
-        let link = $(element).find('a').attr('href');
-        // Akakçe linkleri "/urun/..." diye başlar, başına domain eklemeliyiz
-        if (link && !link.startsWith('http')) {
-            link = `https://www.akakce.com${link}`;
-        }
+            if (title && priceWhole) {
+                // "1.250" -> 1250, "00" -> .00
+                const cleanPrice = parseFloat(`${priceWhole.replace(/\./g, '')}.${priceFraction || '00'}`);
+                
+                products.push({
+                    id: `amz-${i}`,
+                    source: 'Amazon',
+                    title: title,
+                    price: cleanPrice,
+                    image: img,
+                    url: link || amazonUrl
+                });
+            }
+        });
+        console.log("✅ Amazon verisi alındı.");
+    }
+  } catch (e) { console.log("Amazon atlandı."); }
 
-        // b) Ürün Görseli
-        // Bazen lazy-load olur, data-src veya src kontrol edilir
-        const image = $(element).find('img').attr('src') || 
-                      $(element).find('img').attr('data-src') || 
-                      'https://via.placeholder.com/150';
+  // --- 3. HEDEF: n11 (Alternatif) ---
+  try {
+      const n11Url = `https://www.n11.com/arama?q=${encodeURIComponent(query)}`;
+      const res = await fetch(n11Url, { headers: getRandomHeader() });
 
-        // c) Ürün Başlığı
-        const title = $(element).find('.pn_v8').text().trim();
+      if (res.ok) {
+          const html = await res.text();
+          const $ = cheerio.load(html);
 
-        // d) Fiyat
-        // "1.250,00 TL" formatında gelir, sayıya çevirmemiz lazım
-        const priceText = $(element).find('.pt_v8').text().trim();
-        
-        // e) Satıcı (Opsiyonel - bazen listede görünmez, detayda görünür)
-        // Akakçe listede bazen satıcı göstermez ama en ucuz satıcıyı tahmin edebiliriz.
-        // Şimdilik "Piyasa" diyoruz.
-        
-        if (title && priceText && link) {
-            // Fiyatı temizle (TL yazısını at, noktaları sil, virgülü nokta yap)
-            const cleanPrice = parseFloat(
-                priceText.replace('TL', '').replace(/\./g, '').replace(',', '.').trim()
-            );
+          $('li.column').each((i, el) => {
+              if (i > 2) return;
+              const title = $(el).find('.productName').text().trim();
+              const priceText = $(el).find('.newPrice ins').text().trim().split(' ')[0]; // "1.250,00 TL" -> "1.250,00"
+              const img = $(el).find('.cardImage').attr('data-src') || $(el).find('.cardImage').attr('src') || '';
+              const link = $(el).find('a').attr('href');
 
-            products.push({
-                id: `ak-${index}`,
-                source: 'Akakçe',
-                seller: 'En Uygun Satıcı', // Detay sayfasına girilmediği için genel yazdık
-                title: title,
-                price: cleanPrice,
-                image: image,
-                url: link
-            });
-        }
-    });
+              if (title && priceText) {
+                   const cleanPrice = parseFloat(priceText.replace(/\./g, '').replace(',', '.'));
+                   products.push({
+                      id: `n11-${i}`,
+                      source: 'n11',
+                      title: title,
+                      price: cleanPrice,
+                      image: img,
+                      url: link || n11Url
+                   });
+              }
+          });
+          console.log("✅ n11 verisi alındı.");
+      }
+  } catch (e) { console.log("n11 atlandı."); }
 
-    console.log(`✅ ${products.length} ürün bulundu.`);
-
-  } catch (error) {
-    console.error("Scraping Hatası:", error);
-    // Hata olsa bile boş dizi dön ki frontend çökmesin
-  }
-
-  // --- SONUÇ ---
+  // --- SONUÇ KONTROLÜ ---
   if (products.length === 0) {
-      // Eğer Akakçe engellerse veya ürün yoksa boş döner
-      return NextResponse.json({ message: 'Ürün bulunamadı veya erişim engellendi.' }, { status: 404 });
+      // Hiçbir yerden veri gelmezse boş liste dönmeyelim, hata mesajı verelim
+      return NextResponse.json([{
+          id: 'error',
+          title: 'Bağlantı Sorunu (IP Engellendi)',
+          price: 0,
+          image: 'https://placehold.co/600x400?text=Bloklandi',
+          url: '#',
+          source: 'Sistem'
+      }]);
   }
 
-  // En ucuzdan pahalıya sıralayıp gönderelim
+  // Fiyata göre sırala (En ucuz en üstte)
   return NextResponse.json(products.sort((a, b) => a.price - b.price));
 }
