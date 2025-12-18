@@ -1,117 +1,189 @@
 import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
+// Tip Tanımları
+interface ProductResult {
+  id: string;
+  name: string;
+  productName: string;
+  price: string;
+  updated: string;
+  color: string;
+  image?: string;
+  link?: string;
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
 
-  if (!query) return NextResponse.json({ error: 'Sorgu yok' }, { status: 400 });
-
-  const results = [];
-
-  // --- 1. MIGROS (Gerçek API Kullanımı) ---
-  try {
-    // Migros'un frontend'inin kullandığı gizli API ucu
-    const migrosPayload = {
-      query: query,
-      options: { sort: "RELEVANCE" }
-    };
-
-    const migrosRes = await fetch("https://www.migros.com.tr/api/product-search-service/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-        "Referer": "https://www.migros.com.tr"
-      },
-      body: JSON.stringify(migrosPayload)
-    });
-
-    if (migrosRes.ok) {
-      const data = await migrosRes.json();
-      // Migros API yapısına göre ilk ürünü alıyoruz
-      if (data.data && data.data.searchInfo && data.data.searchInfo.storeProductInfos && data.data.searchInfo.storeProductInfos.length > 0) {
-        const product = data.data.searchInfo.storeProductInfos[0];
-        // İndirimli fiyat varsa onu, yoksa normal satış fiyatını al
-        const price = product.shownPrice || product.salePrice; 
-        
-        results.push({
-          id: 'migros',
-          name: 'Migros',
-          productName: product.name, // Gerçek ürün adını da alalım
-          price: (price / 100).toFixed(2), // Migros fiyatı kuruş cinsinden verir (örn: 5500 -> 55.00)
-          updated: 'Canlı Veri',
-          color: 'bg-orange-500'
-        });
-      }
-    }
-  } catch (e) {
-    console.error("Migros Hatası:", e);
-  }
-
-  // --- 2. CARREFOURSA (HTML Scraping - Cheerio ile) ---
-  try {
-    const carrefourRes = await fetch(`https://www.carrefoursa.com/search/?text=${encodeURIComponent(query)}`, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
-    });
-
-    const html = await carrefourRes.text();
-    const $ = cheerio.load(html);
-
-    // Carrefour'un ürün kartı yapısı (.product-card veya .item-price)
-    // İlk ürünün fiyatını çekiyoruz
-    const priceText = $('.item-price').first().text().trim() || $('.product_price').first().text().trim();
-    
-    // Fiyat metnini temizle (örn: "59,90 TL" -> "59.90")
-    const cleanPrice = priceText.replace('TL', '').replace(/\s/g, '').replace(',', '.');
-
-    if (cleanPrice && !isNaN(parseFloat(cleanPrice))) {
-       results.push({
-        id: 'carrefour',
-        name: 'CarrefourSA',
-        price: cleanPrice,
-        updated: 'Canlı Veri',
-        color: 'bg-blue-800'
-      });
-    }
-  } catch (e) {
-    console.error("Carrefour Hatası:", e);
-  }
-
-  // --- 3. A101 (Zorlu Bot Koruması) ---
-  // Not: A101 sunucu taraflı istekleri çok sıkı bloklar.
-  // Eğer bloklarsa yalan atmasın diye kontrol ekliyoruz.
-  try {
-      const a101Res = await fetch(`https://www.a101.com.tr/list/?search_text=${encodeURIComponent(query)}`, {
-        headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-        }
-      });
-      const htmlA101 = await a101Res.text();
-      // Basit bir regex denemesi, başarısız olursa eklemeyeceğiz.
-      const matchA101 = htmlA101.match(/"currentPrice":(\d+\.?\d*)/) || htmlA101.match(/class="current-price"[^>]*>₺([\d,]+)/);
-      
-      if (matchA101) {
-          const p = matchA101[1].replace(',', '.');
-          results.push({ id: 'a101', name: 'A101', price: p, updated: 'Canlı Veri', color: 'bg-blue-500' });
-      } else {
-           // A101 verisi çekilemediyse boş dönüyoruz, uydurmuyoruz.
-           // İstersen buraya "Fiyat Uygulamada" diye placeholder ekleyebilirsin.
-      }
-  } catch(e) { console.log("A101 Blokladı"); }
-
-  // Eğer hiçbir marketten veri gelmediyse
-  if (results.length === 0) {
+  if (!query || query.length < 3) {
       return NextResponse.json([{ 
-          id: 'error', 
-          name: 'Sonuç Bulunamadı', 
-          price: '---', 
-          updated: 'Lütfen ürün adını kontrol et' 
+          id: 'warn', 
+          name: 'Sorgu Kısa', 
+          productName: 'En az 3 harf giriniz (Örn: Süt)',
+          price: '0.00', 
+          updated: 'Uyarı',
+          color: 'bg-yellow-500',
+          link: '#'
       }]);
   }
 
-  // Ucuzdan pahalıya sırala
+  console.log(`🛒 Pazarama ve Yerel Marketler Taranıyor: ${query}`);
+  const results: ProductResult[] = [];
+
+  // Tarayıcı Taklidi Yapan Headerlar
+  const headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+  };
+
+  // --------------------------------------------------------------------------
+  // 1. HEDEF: PAZARAMA (API Yöntemi)
+  // Pazarama, İş Bankası'nın pazar yeridir. Migros/A101 ürünleri de burada satılır.
+  // --------------------------------------------------------------------------
+  try {
+    const pazaramaUrl = `https://www.pazarama.com/arama?q=${encodeURIComponent(query)}`;
+    const res = await fetch(pazaramaUrl, { headers });
+    
+    if (res.ok) {
+        const html = await res.text();
+        const $ = cheerio.load(html);
+
+        // Pazarama ürün kartlarını yakalıyoruz
+        // CSS sınıfları bazen değişir, en genel yapıyı seçiyoruz
+        $('[data-testid="product-card"]').each((i, el) => {
+            if (i > 3) return; // İlk 4 sonuç
+
+            const name = $(el).find('[data-testid="product-card-name"]').text().trim();
+            const priceText = $(el).find('[data-testid="product-card-price"]').text().trim();
+            const img = $(el).find('img').attr('src');
+            let link = $(el).find('a').attr('href');
+            if (link && !link.startsWith('http')) link = `https://www.pazarama.com${link}`;
+
+            if (name && priceText) {
+                // Fiyat temizliği: "1.250,00 TL" -> "1250.00"
+                const cleanPrice = priceText
+                    .replace('TL', '')
+                    .replace(/\./g, '')  // Binlik ayracı sil
+                    .replace(',', '.')   // Ondalık ayracı düzelt
+                    .trim();
+
+                results.push({
+                    id: `pazarama-${i}`,
+                    name: 'Pazarama (Piyasa)',
+                    productName: name,
+                    price: cleanPrice,
+                    updated: 'Canlı Veri',
+                    color: 'bg-pink-600', // Pazarama Rengi
+                    image: img,
+                    link: link || '#'
+                });
+            }
+        });
+        if (results.length > 0) console.log(`✅ Pazarama: ${results.length} veri alındı.`);
+    } else {
+        console.log(`❌ Pazarama Erişim Hatası: ${res.status}`);
+    }
+  } catch (e) { console.log("Pazarama Hata"); }
+
+  // --------------------------------------------------------------------------
+  // 2. HEDEF: ONUR MARKET (HTML Yöntemi)
+  // Yerel market zincirleri genelde bot koruması kullanmaz.
+  // --------------------------------------------------------------------------
+  if (results.length < 5) {
+      try {
+        const onurUrl = `https://www.onurmarket.com/arama?q=${encodeURIComponent(query)}`;
+        const res = await fetch(onurUrl, { headers });
+
+        if (res.ok) {
+            const html = await res.text();
+            const $ = cheerio.load(html);
+
+            $('.showcase-content').each((i, el) => {
+                if (i > 2) return;
+                const name = $(el).find('.showcase-title a').text().trim();
+                const priceText = $(el).find('.showcase-price-new').text().trim();
+                const img = $(el).find('.showcase-image img').attr('src');
+                let link = $(el).find('.showcase-title a').attr('href');
+                 if (link && !link.startsWith('http')) link = `https://www.onurmarket.com${link}`;
+
+                if (name && priceText) {
+                    const cleanPrice = priceText
+                        .replace('TL', '')
+                        .replace(/\s/g, '')
+                        .replace(',', '.');
+
+                    results.push({
+                        id: `onur-${i}`,
+                        name: 'Onur Market',
+                        productName: name,
+                        price: cleanPrice,
+                        updated: 'Canlı Veri',
+                        color: 'bg-green-600',
+                        image: img,
+                        link: link || '#'
+                    });
+                }
+            });
+            if (results.length > 0) console.log(`✅ Onur Market: Veri alındı.`);
+        }
+      } catch (e) { console.log("Onur Market Hata"); }
+  }
+
+    // --------------------------------------------------------------------------
+  // 3. HEDEF: AMAZON TÜRKİYE (YEDEK)
+  // Amazon bazen HTML isteğine izin verir (agresif olmazsan).
+  // --------------------------------------------------------------------------
+  if (results.length === 0) {
+    try {
+        const amazonUrl = `https://www.amazon.com.tr/s?k=${encodeURIComponent(query)}`;
+        const res = await fetch(amazonUrl, { headers });
+        if(res.ok) {
+             const html = await res.text();
+             const $ = cheerio.load(html);
+             
+             $('[data-component-type="s-search-result"]').each((i, el) => {
+                 if (i > 1) return;
+                 const name = $(el).find('h2 a span').text().trim();
+                 const priceWhole = $(el).find('.a-price-whole').text().trim();
+                 const priceFraction = $(el).find('.a-price-fraction').text().trim();
+                 
+                 if (name && priceWhole) {
+                     const cleanPrice = `${priceWhole.replace(/\./g, '')}.${priceFraction}`;
+                     results.push({
+                         id: `amazon-${i}`,
+                         name: 'Amazon TR',
+                         productName: name,
+                         price: cleanPrice,
+                         updated: 'Canlı Veri',
+                         color: 'bg-yellow-500',
+                         link: '#'
+                     });
+                 }
+             });
+        }
+    } catch (e) {}
+  }
+
+
+  // SONUÇ KONTROLÜ
+  if (results.length === 0) {
+      console.log("⚠️ Tüm kaynaklar erişimi reddetti.");
+      return NextResponse.json([{ 
+          id: 'error', 
+          name: 'Bağlantı Sorunu', 
+          productName: 'Marketler IP adresini engelledi.',
+          price: '0.00', 
+          updated: 'VPN/Proxy Gerekli',
+          color: 'bg-red-500',
+          link: '#'
+      }]);
+  }
+
+  // Fiyata göre sırala
   return NextResponse.json(results.sort((a, b) => parseFloat(a.price) - parseFloat(b.price)));
 }
