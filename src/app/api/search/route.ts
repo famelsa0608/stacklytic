@@ -1,189 +1,113 @@
 import { NextResponse } from 'next/server';
 import * as cheerio from 'cheerio';
 
-// Tip Tanımları
-interface ProductResult {
+// Front-end'e dönecek verinin tipi
+interface ProductData {
   id: string;
-  name: string;
-  productName: string;
-  price: string;
-  updated: string;
-  color: string;
-  image?: string;
-  link?: string;
+  title: string;
+  price: number;
+  image: string;
+  url: string;
+  source: string; // 'Akakçe', 'Cimri' vb.
+  seller?: string; // 'Migros', 'Amazon' vb.
 }
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get('q');
 
-  if (!query || query.length < 3) {
-      return NextResponse.json([{ 
-          id: 'warn', 
-          name: 'Sorgu Kısa', 
-          productName: 'En az 3 harf giriniz (Örn: Süt)',
-          price: '0.00', 
-          updated: 'Uyarı',
-          color: 'bg-yellow-500',
-          link: '#'
-      }]);
+  if (!query) {
+    return NextResponse.json({ error: 'Lütfen bir ürün ismi girin.' }, { status: 400 });
   }
 
-  console.log(`🛒 Pazarama ve Yerel Marketler Taranıyor: ${query}`);
-  const results: ProductResult[] = [];
+  console.log(`🕵️ Backend Aranıyor: ${query}`);
+  const products: ProductData[] = [];
 
-  // Tarayıcı Taklidi Yapan Headerlar
+  // --- İNSAN TAKLİDİ YAPAN HEADERLAR (User-Agent Spoofing) ---
+  // Bu kısım çok önemli. Bot olduğumuzu gizlemeye çalışıyoruz.
   const headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "tr-TR,tr;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer': 'https://www.google.com/',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
   };
 
-  // --------------------------------------------------------------------------
-  // 1. HEDEF: PAZARAMA (API Yöntemi)
-  // Pazarama, İş Bankası'nın pazar yeridir. Migros/A101 ürünleri de burada satılır.
-  // --------------------------------------------------------------------------
   try {
-    const pazaramaUrl = `https://www.pazarama.com/arama?q=${encodeURIComponent(query)}`;
-    const res = await fetch(pazaramaUrl, { headers });
+    // 1. ADIM: Akakçe Arama Sayfasına Git
+    const targetUrl = `https://www.akakce.com/arama/?q=${encodeURIComponent(query)}`;
     
-    if (res.ok) {
-        const html = await res.text();
-        const $ = cheerio.load(html);
-
-        // Pazarama ürün kartlarını yakalıyoruz
-        // CSS sınıfları bazen değişir, en genel yapıyı seçiyoruz
-        $('[data-testid="product-card"]').each((i, el) => {
-            if (i > 3) return; // İlk 4 sonuç
-
-            const name = $(el).find('[data-testid="product-card-name"]').text().trim();
-            const priceText = $(el).find('[data-testid="product-card-price"]').text().trim();
-            const img = $(el).find('img').attr('src');
-            let link = $(el).find('a').attr('href');
-            if (link && !link.startsWith('http')) link = `https://www.pazarama.com${link}`;
-
-            if (name && priceText) {
-                // Fiyat temizliği: "1.250,00 TL" -> "1250.00"
-                const cleanPrice = priceText
-                    .replace('TL', '')
-                    .replace(/\./g, '')  // Binlik ayracı sil
-                    .replace(',', '.')   // Ondalık ayracı düzelt
-                    .trim();
-
-                results.push({
-                    id: `pazarama-${i}`,
-                    name: 'Pazarama (Piyasa)',
-                    productName: name,
-                    price: cleanPrice,
-                    updated: 'Canlı Veri',
-                    color: 'bg-pink-600', // Pazarama Rengi
-                    image: img,
-                    link: link || '#'
-                });
-            }
-        });
-        if (results.length > 0) console.log(`✅ Pazarama: ${results.length} veri alındı.`);
-    } else {
-        console.log(`❌ Pazarama Erişim Hatası: ${res.status}`);
+    const response = await fetch(targetUrl, { headers });
+    
+    if (!response.ok) {
+        throw new Error(`Akakçe Erişim Hatası: ${response.status}`);
     }
-  } catch (e) { console.log("Pazarama Hata"); }
 
-  // --------------------------------------------------------------------------
-  // 2. HEDEF: ONUR MARKET (HTML Yöntemi)
-  // Yerel market zincirleri genelde bot koruması kullanmaz.
-  // --------------------------------------------------------------------------
-  if (results.length < 5) {
-      try {
-        const onurUrl = `https://www.onurmarket.com/arama?q=${encodeURIComponent(query)}`;
-        const res = await fetch(onurUrl, { headers });
+    const html = await response.text();
+    const $ = cheerio.load(html);
 
-        if (res.ok) {
-            const html = await res.text();
-            const $ = cheerio.load(html);
+    // 2. ADIM: HTML İçinden Verileri Ayıkla (Parsing)
+    // Akakçe'nin listeleme yapısı genelde "ul#CPL > li" içindedir.
+    $('ul#CPL > li').each((index, element) => {
+        // Çok fazla sonuç çekmemek için ilk 5-10 ürünü alalım
+        if (index > 8) return;
 
-            $('.showcase-content').each((i, el) => {
-                if (i > 2) return;
-                const name = $(el).find('.showcase-title a').text().trim();
-                const priceText = $(el).find('.showcase-price-new').text().trim();
-                const img = $(el).find('.showcase-image img').attr('src');
-                let link = $(el).find('.showcase-title a').attr('href');
-                 if (link && !link.startsWith('http')) link = `https://www.onurmarket.com${link}`;
+        // a) Ürün Linki
+        let link = $(element).find('a').attr('href');
+        // Akakçe linkleri "/urun/..." diye başlar, başına domain eklemeliyiz
+        if (link && !link.startsWith('http')) {
+            link = `https://www.akakce.com${link}`;
+        }
 
-                if (name && priceText) {
-                    const cleanPrice = priceText
-                        .replace('TL', '')
-                        .replace(/\s/g, '')
-                        .replace(',', '.');
+        // b) Ürün Görseli
+        // Bazen lazy-load olur, data-src veya src kontrol edilir
+        const image = $(element).find('img').attr('src') || 
+                      $(element).find('img').attr('data-src') || 
+                      'https://via.placeholder.com/150';
 
-                    results.push({
-                        id: `onur-${i}`,
-                        name: 'Onur Market',
-                        productName: name,
-                        price: cleanPrice,
-                        updated: 'Canlı Veri',
-                        color: 'bg-green-600',
-                        image: img,
-                        link: link || '#'
-                    });
-                }
+        // c) Ürün Başlığı
+        const title = $(element).find('.pn_v8').text().trim();
+
+        // d) Fiyat
+        // "1.250,00 TL" formatında gelir, sayıya çevirmemiz lazım
+        const priceText = $(element).find('.pt_v8').text().trim();
+        
+        // e) Satıcı (Opsiyonel - bazen listede görünmez, detayda görünür)
+        // Akakçe listede bazen satıcı göstermez ama en ucuz satıcıyı tahmin edebiliriz.
+        // Şimdilik "Piyasa" diyoruz.
+        
+        if (title && priceText && link) {
+            // Fiyatı temizle (TL yazısını at, noktaları sil, virgülü nokta yap)
+            const cleanPrice = parseFloat(
+                priceText.replace('TL', '').replace(/\./g, '').replace(',', '.').trim()
+            );
+
+            products.push({
+                id: `ak-${index}`,
+                source: 'Akakçe',
+                seller: 'En Uygun Satıcı', // Detay sayfasına girilmediği için genel yazdık
+                title: title,
+                price: cleanPrice,
+                image: image,
+                url: link
             });
-            if (results.length > 0) console.log(`✅ Onur Market: Veri alındı.`);
         }
-      } catch (e) { console.log("Onur Market Hata"); }
+    });
+
+    console.log(`✅ ${products.length} ürün bulundu.`);
+
+  } catch (error) {
+    console.error("Scraping Hatası:", error);
+    // Hata olsa bile boş dizi dön ki frontend çökmesin
   }
 
-    // --------------------------------------------------------------------------
-  // 3. HEDEF: AMAZON TÜRKİYE (YEDEK)
-  // Amazon bazen HTML isteğine izin verir (agresif olmazsan).
-  // --------------------------------------------------------------------------
-  if (results.length === 0) {
-    try {
-        const amazonUrl = `https://www.amazon.com.tr/s?k=${encodeURIComponent(query)}`;
-        const res = await fetch(amazonUrl, { headers });
-        if(res.ok) {
-             const html = await res.text();
-             const $ = cheerio.load(html);
-             
-             $('[data-component-type="s-search-result"]').each((i, el) => {
-                 if (i > 1) return;
-                 const name = $(el).find('h2 a span').text().trim();
-                 const priceWhole = $(el).find('.a-price-whole').text().trim();
-                 const priceFraction = $(el).find('.a-price-fraction').text().trim();
-                 
-                 if (name && priceWhole) {
-                     const cleanPrice = `${priceWhole.replace(/\./g, '')}.${priceFraction}`;
-                     results.push({
-                         id: `amazon-${i}`,
-                         name: 'Amazon TR',
-                         productName: name,
-                         price: cleanPrice,
-                         updated: 'Canlı Veri',
-                         color: 'bg-yellow-500',
-                         link: '#'
-                     });
-                 }
-             });
-        }
-    } catch (e) {}
+  // --- SONUÇ ---
+  if (products.length === 0) {
+      // Eğer Akakçe engellerse veya ürün yoksa boş döner
+      return NextResponse.json({ message: 'Ürün bulunamadı veya erişim engellendi.' }, { status: 404 });
   }
 
-
-  // SONUÇ KONTROLÜ
-  if (results.length === 0) {
-      console.log("⚠️ Tüm kaynaklar erişimi reddetti.");
-      return NextResponse.json([{ 
-          id: 'error', 
-          name: 'Bağlantı Sorunu', 
-          productName: 'Marketler IP adresini engelledi.',
-          price: '0.00', 
-          updated: 'VPN/Proxy Gerekli',
-          color: 'bg-red-500',
-          link: '#'
-      }]);
-  }
-
-  // Fiyata göre sırala
-  return NextResponse.json(results.sort((a, b) => parseFloat(a.price) - parseFloat(b.price)));
+  // En ucuzdan pahalıya sıralayıp gönderelim
+  return NextResponse.json(products.sort((a, b) => a.price - b.price));
 }

@@ -107,7 +107,7 @@ export default function Marketlytic() {
                 key={market.id}
                 initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: index * 0.05 }}
-                className={`flex items-center justify-between p-6 bg-white rounded-[2rem] border-2 transition-all ${
+                className={`flex items-center justify-between p-6 bg-white rounded-4xl border-2 transition-all ${
                   index === 0 ? 'border-green-500 shadow-xl shadow-green-500/10' : 'border-slate-100'
                 }`}
               >
