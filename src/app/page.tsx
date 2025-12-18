@@ -1,8 +1,7 @@
-"use client" // <-- Bu satırı eklemek hatayı çözer
+"use client"
 
 import dynamic from 'next/dynamic'
 
-// Calculator bileşenini güvenli bir şekilde yüklüyoruz
 const Calculator = dynamic(() => import('./components/Calculator'), { 
   ssr: false 
 })
